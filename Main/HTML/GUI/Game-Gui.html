@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blob Game Loader</title>
+<style>
+body{margin:0;padding:0;background:black;color:white;font-family:Arial,sans-serif;}
+#menuOverlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.95);display:flex;justify-content:center;align-items:center;z-index:100;}
+.overlay-content{background:black;color:white;border:2px solid white;border-radius:10px;width:90%;max-width:800px;max-height:90%;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:15px;}
+.overlay-header input{width:100%;padding:8px;background:black;color:white;border:1px solid white;border-radius:5px;margin-bottom:10px;font-size:16px;}
+.game-list{display:flex;flex-direction:column;gap:8px;}
+.game-list button{background:black;color:white;border:1px solid white;padding:8px 10px;cursor:pointer;border-radius:5px;text-align:left;font-size:16px;}
+.game-list button:hover{background:#222;}
+#iframeWrapper{position:fixed;top:0;left:0;width:100%;height:100%;z-index:200;display:none;}
+#gameContainer{width:100%;height:100%;border:none;}
+#closeGameBtn{position:fixed;top:20px;right:20px;z-index:201;background:red;color:white;border:none;border-radius:50%;width:40px;height:40px;font-size:24px;cursor:pointer;display:none;}
+</style>
+</head>
+<body>
+
+<div id="menuOverlay">
+  <div class="overlay-content">
+    <div class="overlay-header">
+      <input type="text" id="gameSearch" placeholder="Search games...">
+    </div>
+    <div class="game-list" id="gameList"></div>
+  </div>
+</div>
+
+<div id="iframeWrapper">
+  <iframe id="gameContainer"></iframe>
+</div>
+<button id="closeGameBtn">X</button>
+
+<script>
+const gameList = document.getElementById('gameList');
+const gameSearch = document.getElementById('gameSearch');
+const gameContainer = document.getElementById('gameContainer');
+const iframeWrapper = document.getElementById('iframeWrapper');
+const closeGameBtn = document.getElementById('closeGameBtn');
+let gamesData = [];
+
+// Fetch game list
+async function fetchGames() {
+    try {
+        const res = await fetch('https://games-emb.glitchoverride1.workers.dev/');
+        gamesData = await res.json();
+        populateGames();
+    } catch(err){
+        console.error(err);
+        gameList.innerHTML="<p>⚠ Could not load game list</p>";
+    }
+}
+
+// Populate menu
+function populateGames() {
+    const term = gameSearch.value.toLowerCase();
+    gameList.innerHTML='';
+    gamesData.filter(g=>g.name.toLowerCase().includes(term)).forEach(g=>{
+        const btn=document.createElement('button');
+        btn.textContent=g.name;
+        btn.addEventListener('click',()=>loadGameBlob(g.url));
+        gameList.appendChild(btn);
+    });
+}
+gameSearch.addEventListener('input',populateGames);
+
+// Load game into blob iframe
+async function loadGameBlob(url){
+    try{
+        let html = await fetch(url).then(r=>r.text());
+        let baseMatch = html.match(/<base\s+href=["']([^"']+)["']/i);
+        const base = baseMatch?baseMatch[1]:url.substring(0,url.lastIndexOf('/')+1);
+
+        // --- UNIVERSAL SHIM INCLUDING UNITY PATCH ---
+        const shim = `
+        <script>
+        (function(){
+            const base = "${base}";
+            const realURL = window.URL;
+            const realFetch = window.fetch;
+            const realOpen = Document.prototype.open;
+            const realWrite = Document.prototype.write;
+            const realWriteln = Document.prototype.writeln;
+            const realClose = Document.prototype.close;
+
+            // Patch URL
+            window.URL = function(resource, relative){
+                try{
+                    if(relative===undefined){ return new realURL(resource, base);}
+                    else{return new realURL(resource, relative);}
+                }catch(e){return new realURL(resource, base);}
+            };
+            window.URL.createObjectURL=realURL.createObjectURL;
+            window.URL.revokeObjectURL=realURL.revokeObjectURL;
+
+            // Patch fetch
+            window.fetch = async function(resource, init){
+                if(typeof resource==='string' && !/^https?:|^blob:/.test(resource)){
+                    resource=base+resource;
+                }
+                return realFetch(resource, init);
+            };
+
+            // Patch dynamically added scripts
+            const origAppend=Element.prototype.appendChild;
+            Element.prototype.appendChild=function(el){
+                if(el.tagName==='SCRIPT' && el.src && !/^https?:/.test(el.src)){
+                    el.src=base+el.src;
+                }
+                return origAppend.call(this, el);
+            };
+
+            // Patch document write/open/close
+            Document.prototype.open = function(type, replace){return realOpen.call(this,type||'text/html',replace);}
+            Document.prototype.write = function(...args){
+                const patched=args.map(s=>s.replace(/(src|href)=["'](?!https?:|blob:)([^"']+)["']/gi,
+                    (_,attr,val)=>attr+'="'+base+val+'"')).join('');
+                return realWrite.call(this, patched);
+            }
+            Document.prototype.writeln = function(...args){
+                const patched=args.map(s=>s.replace(/(src|href)=["'](?!https?:|blob:)([^"']+)["']/gi,
+                    (_,attr,val)=>attr+'="'+base+val+'"')).join('');
+                return realWriteln.call(this, patched);
+            }
+            Document.prototype.close = function(){return realClose.call(this);}
+
+            // UNITY PATCH
+            if(window.UnityLoader){
+                const origInstantiate = window.UnityLoader.instantiate;
+                window.UnityLoader.instantiate = function(containerId, buildUrl, config){
+                    let container = document.getElementById(containerId);
+                    if(!container){
+                        container = document.createElement('div');
+                        container.id = containerId;
+                        container.style.width='100%';
+                        container.style.height='100%';
+                        container.style.position='absolute';
+                        container.style.top='0';
+                        container.style.left='0';
+                        document.body.appendChild(container);
+                    }
+                    if(config){
+                        if(config.dataUrl && !/^https?:|^blob:/.test(config.dataUrl)) config.dataUrl = base + config.dataUrl;
+                        if(config.frameworkUrl && !/^https?:|^blob:/.test(config.frameworkUrl)) config.frameworkUrl = base + config.frameworkUrl;
+                        if(config.codeUrl && !/^https?:|^blob:/.test(config.codeUrl)) config.codeUrl = base + config.codeUrl;
+                    }
+                    return origInstantiate(containerId, buildUrl, config);
+                }
+            }
+        })();
+        <\/script>`;
+
+        html = html.replace(/<\/body>/i, shim+"</body>");
+
+        const blob = new Blob([html],{type:'text/html'});
+        const blobUrl = URL.createObjectURL(blob);
+
+        gameContainer.src = blobUrl;
+        iframeWrapper.style.display='block';
+        closeGameBtn.style.display='block';
+        document.getElementById('menuOverlay').style.display='none';
+    }catch(err){
+        console.error("Game load failed:", err);
+        alert("Failed to load game, check console.");
+    }
+}
+
+closeGameBtn.addEventListener('click',()=>{
+    iframeWrapper.style.display='none';
+    gameContainer.src='about:blank';
+    closeGameBtn.style.display='none';
+    document.getElementById('menuOverlay').style.display='flex';
+});
+
+fetchGames();
+</script>
+</body>
+  </html>
